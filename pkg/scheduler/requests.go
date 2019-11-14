@@ -20,6 +20,7 @@ import (
     "errors"
     "fmt"
     "github.com/cloudera/yunikorn-core/pkg/common/resources"
+    "github.com/google/btree"
     "sync"
 )
 
@@ -30,6 +31,7 @@ type SchedulingRequests struct {
     // AllocationKey -> allocationInfo
     requests             map[string]*SchedulingAllocationAsk
     totalPendingResource *resources.Resource
+    requestBTree          *btree.BTree
 
     lock sync.RWMutex
 }
@@ -38,6 +40,7 @@ func NewSchedulingRequests() *SchedulingRequests {
     return &SchedulingRequests{
         requests:             make(map[string]*SchedulingAllocationAsk),
         totalPendingResource: resources.NewResource(),
+        requestBTree:         btree.New(32),
     }
 }
 
@@ -59,10 +62,12 @@ func (m *SchedulingRequests) AddAllocationAsk(ask *SchedulingAllocationAsk) (*re
     var oldAskResource *resources.Resource = nil
     if oldAsk := m.requests[ask.AskProto.AllocationKey]; oldAsk != nil {
         oldAskResource = resources.MultiplyBy(oldAsk.AllocatedResource, float64(oldAsk.PendingRepeatAsk))
+        m.requestBTree.Delete(oldAsk)
     }
 
     deltaPendingResource.SubFrom(oldAskResource)
     m.requests[ask.AskProto.AllocationKey] = ask
+    m.requestBTree.ReplaceOrInsert(ask)
 
     // Update total pending resource
     m.totalPendingResource = resources.Add(m.totalPendingResource, deltaPendingResource)
@@ -85,6 +90,9 @@ func (m *SchedulingRequests) UpdateAllocationAskRepeat(allocationKey string, del
         deltaPendingResource := resources.MultiplyBy(ask.AllocatedResource, float64(delta))
         m.totalPendingResource = resources.Add(m.totalPendingResource, deltaPendingResource)
         ask.AddPendingAskRepeat(delta)
+        if ask.PendingRepeatAsk <= 0 {
+            m.requestBTree.Delete(ask)
+        }
 
         return deltaPendingResource, nil
     }
@@ -106,6 +114,7 @@ func (m *SchedulingRequests) RemoveAllocationAsk(allocationKey string) (*resourc
         deltaPendingResource := resources.MultiplyBy(ask.AllocatedResource, -float64(ask.PendingRepeatAsk))
         m.totalPendingResource = resources.Add(m.totalPendingResource, deltaPendingResource)
         delete(m.requests, allocationKey)
+        m.requestBTree.Delete(ask)
         return deltaPendingResource, ask
     }
 
@@ -129,6 +138,7 @@ func (m *SchedulingRequests) CleanupAllocationAsks() *resources.Resource {
     // Cleanup total pending resource
     m.totalPendingResource = resources.NewResource()
     m.requests = make(map[string]*SchedulingAllocationAsk)
+    m.requestBTree = btree.New(32)
 
     return deltaPendingResource
 }

@@ -46,7 +46,7 @@ func (m *Scheduler) singleStepSchedule(nAlloc int, preemptionParam *preemptionPa
         if totalPartitionResource == nil {
             continue
         }
-
+        startTime:=time.Now()
         // Following steps:
         // - According to resource usage, find next N allocation Requests, N could be
         //   mini-batch because we don't want the process takes too long. And this
@@ -56,11 +56,14 @@ func (m *Scheduler) singleStepSchedule(nAlloc int, preemptionParam *preemptionPa
         // - For asks cannot be assigned, we will do preemption. Again it is done using
         //   single-thread.
         candidates := m.findAllocationAsks(totalPartitionResource, partitionContext, nAlloc, m.step, preemptionParam /* it is allocation phase */)
-
+        if len(candidates) <= 0 {
+            continue
+        }
+        findAsksEndTime:=time.Now()
         // Try to allocate from candidates, returns allocation proposal as well as failed allocation
         // ask candidates. (For preemption).
         allocations, _ := m.tryBatchAllocation(partition, partitionContext, candidates, preemptionParam /* it is allocation phase */)
-
+        batchAllocateEndTime:=time.Now()
         // Send allocations to cache, and pending ask.
         confirmedAllocations := make([]*SchedulingAllocation, 0)
         if len(allocations) > 0 {
@@ -81,7 +84,14 @@ func (m *Scheduler) singleStepSchedule(nAlloc int, preemptionParam *preemptionPa
             }
         }
         nAlloc -= len(confirmedAllocations)
-
+        updateCacheEndTime:=time.Now()
+        log.Logger().Info("------>singleStepSchedule",
+            zap.Int("candidates", len(candidates)),
+            zap.Int("allocations", len(allocations)),
+            zap.String("allDuration", updateCacheEndTime.Sub(startTime).String()),
+            zap.Int("confirmedAllocations", len(confirmedAllocations)),
+            zap.String("findAsksDuration", findAsksEndTime.Sub(startTime).String()),
+            zap.String("tryBatchAllocateDuration", batchAllocateEndTime.Sub(findAsksEndTime).String()))
         // Update missed opportunities
         m.handleFailedToAllocationAllocations(confirmedAllocations, candidates, preemptionParam)
     }

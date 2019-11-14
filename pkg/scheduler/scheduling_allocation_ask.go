@@ -20,6 +20,8 @@ import (
     "github.com/cloudera/yunikorn-core/pkg/common"
     "github.com/cloudera/yunikorn-core/pkg/common/resources"
     "github.com/cloudera/yunikorn-scheduler-interface/lib/go/si"
+    "github.com/google/btree"
+    "strings"
     "sync"
 )
 
@@ -83,4 +85,12 @@ func (m* SchedulingAllocationAsk) AddPendingAskRepeat(delta int32) bool {
     } else {
         return false
     }
+}
+
+func (m *SchedulingAllocationAsk) Less(than btree.Item) bool {
+    priorityComp := m.NormalizedPriority - than.(*SchedulingAllocationAsk).NormalizedPriority
+    if priorityComp != 0 {
+        return priorityComp < 0
+    }
+    return strings.Compare(m.AskProto.AllocationKey, than.(*SchedulingAllocationAsk).AskProto.AllocationKey) > 0
 }
