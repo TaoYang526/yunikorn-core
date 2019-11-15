@@ -46,7 +46,6 @@ func (m *Scheduler) singleStepSchedule(nAlloc int, preemptionParam *preemptionPa
         if totalPartitionResource == nil {
             continue
         }
-        startTime:=time.Now()
         // Following steps:
         // - According to resource usage, find next N allocation Requests, N could be
         //   mini-batch because we don't want the process takes too long. And this
@@ -59,11 +58,11 @@ func (m *Scheduler) singleStepSchedule(nAlloc int, preemptionParam *preemptionPa
         if len(candidates) <= 0 {
             continue
         }
-        findAsksEndTime:=time.Now()
+
         // Try to allocate from candidates, returns allocation proposal as well as failed allocation
         // ask candidates. (For preemption).
         allocations, _ := m.tryBatchAllocation(partition, partitionContext, candidates, preemptionParam /* it is allocation phase */)
-        batchAllocateEndTime:=time.Now()
+
         // Send allocations to cache, and pending ask.
         confirmedAllocations := make([]*SchedulingAllocation, 0)
         if len(allocations) > 0 {
@@ -84,14 +83,7 @@ func (m *Scheduler) singleStepSchedule(nAlloc int, preemptionParam *preemptionPa
             }
         }
         nAlloc -= len(confirmedAllocations)
-        updateCacheEndTime:=time.Now()
-        log.Logger().Info("------>singleStepSchedule",
-            zap.Int("candidates", len(candidates)),
-            zap.Int("allocations", len(allocations)),
-            zap.String("allDuration", updateCacheEndTime.Sub(startTime).String()),
-            zap.Int("confirmedAllocations", len(confirmedAllocations)),
-            zap.String("findAsksDuration", findAsksEndTime.Sub(startTime).String()),
-            zap.String("tryBatchAllocateDuration", batchAllocateEndTime.Sub(findAsksEndTime).String()))
+
         // Update missed opportunities
         m.handleFailedToAllocationAllocations(confirmedAllocations, candidates, preemptionParam)
     }
@@ -150,6 +142,8 @@ func (m *Scheduler) tryBatchAllocation(partition string, partitionContext *Parti
     if len(nodeList) <= 0 {
         return make([]*SchedulingAllocation, 0), candidates
     }
+    //init node sorter
+    nodeSorter := NewNodeSorter(nodeList)
 
     ctx, cancel := context.WithCancel(context.Background())
 
@@ -168,11 +162,13 @@ func (m *Scheduler) tryBatchAllocation(partition string, partitionContext *Parti
             return
         }
 
-        schedulingNodeList := evaluateForSchedulingPolicy(m, nodeList, partition, candidate, partitionContext)
-
+        sortedSchedulingNodes := nodeSorter.GetSortedSchedulingNodes(partitionContext.partition.GetNodeSortingPolicy())
+        schedulingNodeList := evaluateForSchedulingPolicy(m, sortedSchedulingNodes, partition, candidate, partitionContext)
         if allocation := m.allocate(schedulingNodeList, candidate, preemptionParam); allocation != nil {
             length := atomic.AddInt32(&allocatedLength, 1)
             allocations[length-1] = allocation
+            // resort updated node
+            nodeSorter.ResortNode(allocation.NodeId)
         } else {
             length := atomic.AddInt32(&failedAskLength, 1)
             preemptionParam.blacklistedRequest[candidate.AskProto.AllocationKey] = true
@@ -224,10 +220,8 @@ func evaluateForSchedulingPolicy(m *Scheduler, nodes []*SchedulingNode, partitio
     configuredPolicy:= partitionContext.partition.GetNodeSortingPolicy()
     switch configuredPolicy {
     case common.BinPackingPolicy:
-        nodes = SortAllNodesWithAscendingResource(nodes)
         return NewBinPackingSortingIterator(nodes)
     case common.FairnessPolicy:
-        SortNodes(nodes, MaxAvailableResources)
         return NewFairSortingIterator(nodes)
     }
 

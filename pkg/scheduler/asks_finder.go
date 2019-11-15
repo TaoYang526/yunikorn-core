@@ -17,12 +17,10 @@ limitations under the License.
 package scheduler
 
 import (
-    "fmt"
     "github.com/cloudera/yunikorn-core/pkg/common/resources"
     "github.com/cloudera/yunikorn-core/pkg/log"
     "github.com/google/btree"
     "go.uber.org/zap"
-    "time"
 )
 
 // Find next set of allocation asks for scheduler to place
@@ -41,17 +39,14 @@ func (m *Scheduler) findAllocationAsks(partitionTotalResource *resources.Resourc
     m.resetMayAllocations(partitionContext)
 
     selectedAsksByAllocationKey := make(map[string]int32, 0)
-    time0 := time.Now()
-    var findNextDurations []string
+
     // Repeatedly go to queue hierarchy, find next allocation ask, until we find N allocations
     found := true
     for found {
         // Find next allocation ask, see if it can be allocated, if yes, add to
         // may allocate list.
-        time1 := time.Now()
         next := m.findNextAllocationAskCandidate(partitionTotalResource, []*SchedulingQueue{partitionContext.Root}, partitionContext,
             nil, nil, curStep, selectedAsksByAllocationKey, preemptionParam)
-        findNextDurations = append(findNextDurations, time.Since(time1).String())
         found = next != nil
 
         if found {
@@ -61,10 +56,6 @@ func (m *Scheduler) findAllocationAsks(partitionTotalResource *resources.Resourc
             }
         }
     }
-        log.Logger().Info("----> findAllocationAsks",
-            zap.Int("mayAllocateList", len(mayAllocateList)),
-            zap.String("findAllAsks", time.Since(time0).String()),
-            zap.String("findNextDurations", fmt.Sprintf("%+v", findNextDurations)))
 
     return mayAllocateList
 }
@@ -116,18 +107,13 @@ func sortApplicationsFromQueue(leafQueue *SchedulingQueue) []*SchedulingApplicat
 
 // sort scheduling Requests from a job
 func (m *Scheduler) findMayAllocationFromApplication(schedulingRequests *SchedulingRequests,
-    headroom *resources.Resource, curStep uint64, selectedPendingAskByAllocationKey map[string]int32, preemptionParameters *preemptionParameters) (*SchedulingAllocationAsk, []string) {
+    headroom *resources.Resource, curStep uint64, selectedPendingAskByAllocationKey map[string]int32, preemptionParameters *preemptionParameters) *SchedulingAllocationAsk {
     schedulingRequests.lock.RLock()
     defer schedulingRequests.lock.RUnlock()
 
     var bestAsk *SchedulingAllocationAsk = nil
-    var timeDurations []string
 
-    time0 := time.Now()
-    count := 0
-    schedulingRequests.requestBTree.Descend(func(item btree.Item) bool {
-      count += 1
-      time1 := time.Now()
+    schedulingRequests.requestTree.Descend(func(item btree.Item) bool {
       v := item.(*SchedulingAllocationAsk)
       if preemptionParameters.crossQueuePreemption {
           // Skip black listed requests for this preemption cycle.
@@ -143,45 +129,19 @@ func (m *Scheduler) findMayAllocationFromApplication(schedulingRequests *Schedul
       }
 
       // Only sort request if its resource fits headroom
-      //fmt.Println("====>", v.AskProto.AllocationKey, v.PendingRepeatAsk, selectedPendingAskByAllocationKey[v.AskProto.AllocationKey], resources.FitIn(headroom, v.AllocatedResource), headroom, v.AllocatedResource)
       if v.PendingRepeatAsk-selectedPendingAskByAllocationKey[v.AskProto.AllocationKey] > 0 && resources.FitIn(headroom, v.AllocatedResource) {
           bestAsk = v
-          timeDurations = append(timeDurations, time.Since(time1).String())
           return false
       } else {
           return true
       }
     })
 
-    //for _, v := range schedulingRequests.requests {
-    //   if preemptionParameters.crossQueuePreemption {
-    //       // Skip black listed requests for this preemption cycle.
-    //       if preemptionParameters.blacklistedRequest[v.AskProto.AllocationKey] {
-    //           continue
-    //       }
-    //   } else {
-    //       // For normal allocation.
-    //       if m.waitTillNextTry[v.AskProto.AllocationKey]&curStep != 0 {
-    //           // this request is "blacklisted"
-    //           continue
-    //       }
-    //   }
-    //
-    //   // Only sort request if its resource fits headroom
-    //    fmt.Println("====>", v.AskProto.AllocationKey, v.PendingRepeatAsk, selectedPendingAskByAllocationKey[v.AskProto.AllocationKey], resources.FitIn(headroom, v.AllocatedResource), headroom, v.AllocatedResource)
-    //   if v.PendingRepeatAsk-selectedPendingAskByAllocationKey[v.AskProto.AllocationKey] > 0 && resources.FitIn(headroom, v.AllocatedResource) {
-    //       if bestAsk == nil || v.NormalizedPriority > bestAsk.NormalizedPriority {
-    //           bestAsk = v
-    //       }
-    //   }
-    //}
-
-    fmt.Println("-------->find best ask: ", count, time.Since(time0), bestAsk)
     if bestAsk != nil {
         selectedPendingAskByAllocationKey[bestAsk.AskProto.AllocationKey] += 1
     }
 
-    return bestAsk, timeDurations
+    return bestAsk
 }
 
 func getHeadroomOfQueue(parentHeadroom *resources.Resource, queueMaxLimit *resources.Resource, queue *SchedulingQueue,
@@ -244,8 +204,8 @@ func (m *Scheduler) findNextAllocationAskCandidate(
 
         // Get headroom
         newHeadroom := getHeadroomOfQueue(parentHeadroom, queueMaxLimit, queue, preemptionParameters)
+
         if queue.isLeafQueue() {
-            time2 := time.Now()
             // Handle for cross queue preemption
             if preemptionParameters.crossQueuePreemption {
                 // We won't allocate resources if the queue is above its guaranteed resource.
@@ -255,22 +215,12 @@ func (m *Scheduler) findNextAllocationAskCandidate(
                     continue
                 }
             }
-            time3 := time.Now()
             sortedApps := sortApplicationsFromQueue(queue)
-            time4 := time.Now()
             for _, app := range sortedApps {
-                time5 := time.Now()
-                if ask, times := m.findMayAllocationFromApplication(app.Requests, newHeadroom, curStep,
+                if ask := m.findMayAllocationFromApplication(app.Requests, newHeadroom, curStep,
                     selectedPendingAskByAllocationKey, preemptionParameters); ask != nil {
                     app.MayAllocatedResource = resources.Add(app.MayAllocatedResource, ask.AllocatedResource)
                     queue.ProposingResource = resources.Add(queue.ProposingResource, ask.AllocatedResource)
-                        log.Logger().Info("----> findNextAllocationAskCandidate",
-                            zap.String("reachLeafQueue", time2.String()),
-                            zap.String("beforeSort", time3.Sub(time2).String()),
-                            zap.String("sortApps", time4.Sub(time3).String()),
-                            zap.String("findApp", time5.Sub(time4).String()),
-                            zap.String("findAsk", time.Since(time5).String()),
-                            zap.Any("durations", times))
                     return ask
                 }
             }

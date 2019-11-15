@@ -17,9 +17,14 @@ limitations under the License.
 package scheduler
 
 import (
+    "github.com/cloudera/yunikorn-core/pkg/common"
     "github.com/cloudera/yunikorn-core/pkg/common/resources"
+    "github.com/cloudera/yunikorn-core/pkg/log"
     "github.com/cloudera/yunikorn-core/pkg/metrics"
+    "github.com/google/btree"
+    "go.uber.org/zap"
     "sort"
+    "strings"
     "time"
 )
 
@@ -93,4 +98,77 @@ func SortAllNodesWithAscendingResource(schedulingNodeList []*SchedulingNode) []*
     metrics.GetSchedulerMetrics().ObserveNodeSortingLatency(sortingStart)
 
     return schedulingNodeList
+}
+
+type SchedulingNodeSnapshot struct {
+    schedulingNode          *SchedulingNode
+    cachedAvailableResource *resources.Resource
+}
+
+func (m *SchedulingNodeSnapshot) Less(than btree.Item) bool {
+    availSharesComp := resources.CompUsageShares(m.cachedAvailableResource, than.(*SchedulingNodeSnapshot).cachedAvailableResource)
+    if availSharesComp != 0 {
+        return availSharesComp < 0
+    }
+    return strings.Compare(m.schedulingNode.NodeId, than.(*SchedulingNodeSnapshot).schedulingNode.NodeId) > 0
+}
+
+type NodeSorter struct {
+    nodeTree *btree.BTree
+    nodes    map[string]*SchedulingNodeSnapshot
+}
+
+func NewNodeSorter(schedulingNodes []*SchedulingNode) *NodeSorter {
+    nodeSorter := &NodeSorter{
+        nodeTree: btree.New(32),
+        nodes: make(map[string]*SchedulingNodeSnapshot),
+    }
+    for _, schedulingNode := range schedulingNodes {
+        nodeSorter.AddSchedulingNode(schedulingNode)
+    }
+    return nodeSorter
+}
+
+func (m *NodeSorter) AddSchedulingNode(schedulingNode *SchedulingNode) {
+    nodeSnapshot := &SchedulingNodeSnapshot{
+        schedulingNode:          schedulingNode,
+        cachedAvailableResource: schedulingNode.cachedAvailableResource.Clone(),
+    }
+    m.nodeTree.ReplaceOrInsert(nodeSnapshot)
+    m.nodes[schedulingNode.NodeId] = nodeSnapshot
+}
+
+func (m *NodeSorter) ResortNode(nodeId string) bool {
+    if nodeSnapshot, ok := m.nodes[nodeId]; ok {
+        deletedItem := m.nodeTree.Delete(nodeSnapshot)
+        if deletedItem == nil {
+            log.Logger().Warn("Can't find node snapshot in node sorter",
+                zap.String("nodeId", nodeId))
+        } else {
+            schedulingNode := deletedItem.(*SchedulingNodeSnapshot).schedulingNode
+            m.AddSchedulingNode(schedulingNode)
+            return true
+        }
+    } else {
+        log.Logger().Warn("Can't find node snapshot in node sorter",
+            zap.String("nodeId", nodeId))
+    }
+    return false
+}
+
+func (m *NodeSorter) GetSortedSchedulingNodes(configuredPolicy common.SortingPolicy) []*SchedulingNode {
+    var sortedSchedulingNodes []*SchedulingNode
+    switch configuredPolicy {
+    case common.BinPackingPolicy:
+        m.nodeTree.Ascend(func(i btree.Item) bool {
+            sortedSchedulingNodes = append(sortedSchedulingNodes, i.(*SchedulingNodeSnapshot).schedulingNode)
+            return true
+        })
+    case common.FairnessPolicy:
+        m.nodeTree.Descend(func(i btree.Item) bool {
+            sortedSchedulingNodes = append(sortedSchedulingNodes, i.(*SchedulingNodeSnapshot).schedulingNode)
+            return true
+        })
+    }
+    return sortedSchedulingNodes
 }
