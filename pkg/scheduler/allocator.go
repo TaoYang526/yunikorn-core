@@ -96,11 +96,11 @@ func (m *Scheduler) regularAllocate(nodes SortingIterator, candidate *Scheduling
         }
 
         node := nodes.Next()
-        if !node.CheckAllocateConditions(candidate.AskProto.AllocationKey) {
-            // skip the node if conditions can not be satisfied
-            continue
-        }
         if node.CheckAndAllocateResource(candidate.AllocatedResource, false /* preemptionPhase */) {
+            if !node.CheckAllocateConditions(candidate.AskProto.AllocationKey) {
+                // skip the node if conditions can not be satisfied
+                continue
+            }
             // before deciding on an allocation, call the reconcile plugin to sync scheduler cache
             // between core and shim if necessary. This is useful when running multiple allocations
             // in parallel and need to handle inter container affinity and anti-affinity.
